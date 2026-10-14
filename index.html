@@ -538,7 +538,7 @@ const view = o => { // what the model sees: everything, except stroke points are
 async function runCommand(text) {
   if (editing) stopEdit();
   closePal(); busy = true; askst.textContent = 'thinking…';
-  const body = { instruction: text, canvas: { w: innerWidth, h: innerHeight }, pen: color, selected: sel ? sel.id : null, mouse: { x: mouse.x, y: mouse.y }, objects: objects.map(view) };
+  const body = { instruction: text, canvas: { w: innerWidth, h: innerHeight }, pen: color, selected: sel ? sel.id : null, mouse: { x: mouse.x, y: mouse.y }, nextId, objects: objects.map(view) };
   try {
     const res = await fetch(API + '/api/command', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const data = await res.json().catch(() => ({}));
@@ -582,8 +582,9 @@ function applySet(o, set) {
   if (o.type === 'text' && set.inside != null && byId(set.inside)) fitInside(o, byId(set.inside));
 }
 function makeObject(spec) {
+  const id = oid(); // consumed even if the spec is invalid, so ids stay aligned with what the model was told
   const type = TYPE_ALIAS[String(spec.type || '').toLowerCase()]; if (!type) return null;
-  const o = { id: oid(), type, color: type === 'text' ? 'black' : (HEX[spec.color] ? spec.color : color) };
+  const o = { id, type, color: type === 'text' ? 'black' : (HEX[spec.color] ? spec.color : color) };
   if (type === 'arrow') { o.x1 = num(spec.x1, 0); o.y1 = num(spec.y1, 0); o.x2 = num(spec.x2, o.x1 + 150); o.y2 = num(spec.y2, o.y1); if (spec.from != null || spec.to != null) attachArrow(o, spec.from, spec.to); }
   else if (type === 'stroke') { o.points = (spec.points || []).map(p => ({ x: num(p.x, NaN), y: num(p.y, NaN) })).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y)); if (o.points.length < 2) return null; }
   else if (type === 'text') {

@@ -31,7 +31,7 @@ OPERATIONS:
 - {"op":"pen","color":"red"}   change the current pen color
 - {"op":"download"}   save the canvas as a PNG;  {"op":"copy"}   copy a text description to the clipboard
 
-GUIDELINES: Just do it; do not ask questions unless the request is truly impossible to interpret. Pick sensible sizes (boxes ~160x90, circles ~100x100), ~40px gaps, keep everything inside the canvas, avoid overlapping existing objects unless asked. "here" / "there" means near the mouse position. A labelled shape = add the shape, then a text with "inside" set to its id (use "$1" style references? NO: ids of objects you add in this batch are assigned in order, continuing from the highest existing id + 1, so you can compute them). Build whole diagrams (flowcharts, trees, etc.) in one batch with arrows via from/to. If the instruction is a question about the canvas, answer in reply with an empty ops list. Output JSON only, no markdown fences.`;
+GUIDELINES: Just do it; do not ask questions unless the request is truly impossible to interpret. Pick sensible sizes (boxes ~160x90, circles ~100x100), ~40px gaps, keep everything inside the canvas, avoid overlapping existing objects unless asked. "here" / "there" means near the mouse position. A labelled shape = add the shape, then a text with "inside" set to its id (use "$1" style references? NO: ids of objects you add in this batch are assigned in order starting from the "next id" given in the request, so you can compute them). Build whole diagrams (flowcharts, trees, etc.) in one batch with arrows via from/to. If the instruction is a question about the canvas, answer in reply with an empty ops list. Output JSON only, no markdown fences.`;
 
 const ipHits = new Map(); let globalHits = [];
 function rateLimited(ip) {
@@ -80,8 +80,9 @@ http.createServer(async (req, res) => {
     if (!instruction) return send(res, 400, { error: "empty instruction" }, origin);
     const canvas = body.canvas || {}, objects = Array.isArray(body.objects) ? body.objects : [];
     const maxId = objects.reduce((m, o) => Math.max(m, Number(o.id) || 0), 0);
+    const nextId = Number(body.nextId) > maxId ? Number(body.nextId) : maxId + 1;
     const user = [
-      `Canvas: ${canvas.w || "?"}x${canvas.h || "?"} px. Pen color: ${body.pen || "black"}. Selected object id: ${body.selected ?? "none"}. Mouse at: (${Math.round(body.mouse?.x ?? 0)},${Math.round(body.mouse?.y ?? 0)}). Highest existing id: ${maxId} (new objects get ${maxId + 1}, ${maxId + 2}, ... in order).`,
+      `Canvas: ${canvas.w || "?"}x${canvas.h || "?"} px. Pen color: ${body.pen || "black"}. Selected object id: ${body.selected ?? "none"}. Mouse at: (${Math.round(body.mouse?.x ?? 0)},${Math.round(body.mouse?.y ?? 0)}). Highest existing id: ${maxId}. New objects you add get ids ${nextId}, ${nextId + 1}, ... in the order you add them.`,
       `Current objects (JSON): ${JSON.stringify(objects)}`,
       `Instruction: ${instruction}`,
     ].join("\n\n");
