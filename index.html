@@ -55,7 +55,9 @@ const bar = document.getElementById('bar'), toast = document.getElementById('toa
 let objects = [], sel = null, color = 'black';
 let mouse = { x: innerWidth / 2, y: innerHeight / 2 };
 let undoStack = [], redoStack = [];
-let drag = null, editing = null, editStart = null, dpr = 1, fresh = null, docText = null;
+let drag = null, editing = null, dpr = 1, fresh = null, docText = null;
+let nextId = 1, lastJSON = null, lastInputAt = 0; // ids survive undo snapshots; lastJSON = state before the current typing burst
+const oid = () => nextId++;
 let palHi = 0, palList = [];
 
 // ---------- toolbar ----------
@@ -84,8 +86,19 @@ function showToast(msg) { toast.textContent = msg; toast.style.opacity = 1; clea
 // ---------- undo ----------
 function pushUndo(json) { undoStack.push(json); if (undoStack.length > 200) undoStack.shift(); redoStack.length = 0; }
 function snapshot() { pushUndo(JSON.stringify(objects)); }
-function undo() { if (editing) stopEdit(); closePal(); if (!undoStack.length) return; redoStack.push(JSON.stringify(objects)); objects = JSON.parse(undoStack.pop()); sel = null; render(); }
-function redo() { if (editing) stopEdit(); if (!redoStack.length) return; undoStack.push(JSON.stringify(objects)); objects = JSON.parse(redoStack.pop()); sel = null; render(); }
+function restoreState(json) {
+  const wasEditing = editing ? editing.id : null;
+  objects = JSON.parse(json); sel = null;
+  if (wasEditing != null) {
+    const t = objects.find(o => o.id === wasEditing && o.type === 'text');
+    if (t) { editing = t; sel = t; ed.value = t.text; placeEd(); ed.focus(); ed.setSelectionRange(ed.value.length, ed.value.length); }
+    else { editing = null; fresh = null; ed.style.display = 'none'; }
+  }
+  lastJSON = JSON.stringify(objects); lastInputAt = 0;
+  render();
+}
+function undo() { closePal(); if (!undoStack.length) return; redoStack.push(JSON.stringify(objects)); restoreState(undoStack.pop()); }
+function redo() { closePal(); if (!redoStack.length) return; undoStack.push(JSON.stringify(objects)); restoreState(redoStack.pop()); }
 
 // ---------- geometry ----------
 const clone = o => JSON.parse(JSON.stringify(o));
@@ -232,6 +245,7 @@ function drawText(c, o, ox, oy) {
   for (const ln of lines) { c.fillText(ln, o.x + ox + PAD, y); y += fs * LH; }
 }
 function drawSel(c, o) {
+  if (o.plain) return;
   c.save(); c.lineWidth = 1; c.strokeStyle = '#4c8dff'; c.setLineDash([4, 3]);
   const b = bbox(o); if (o.type !== 'arrow') c.strokeRect(b.x - 0.5, b.y - 0.5, b.w + 1, b.h + 1);
   c.setLineDash([]); c.fillStyle = '#fff';
@@ -256,24 +270,33 @@ function startEdit(t, before) {
   if (editing === t) return;
   if (editing) stopEdit();
   closePal();
-  editing = t; sel = t; editStart = before || JSON.stringify(objects);
+  editing = t; sel = t; lastJSON = before || JSON.stringify(objects); lastInputAt = 0;
   if (t.plain) docText = t;
   ed.value = t.text; ed.style.display = 'block'; placeEd(); render();
   ed.focus(); ed.setSelectionRange(ed.value.length, ed.value.length);
 }
-function stopEdit() {
+function stopEdit(keepEmpty) {
   if (!editing) return;
   const t = editing; editing = null; ed.style.display = 'none';
   t.text = ed.value.replace(/\s+$/, '');
-  if (!t.text.trim()) { const i = objects.indexOf(t); if (i >= 0) objects.splice(i, 1); if (sel === t) sel = null; }
-  if (JSON.stringify(objects) !== editStart) pushUndo(editStart);
+  if (!t.text.trim() && !keepEmpty) { const i = objects.indexOf(t); if (i >= 0) objects.splice(i, 1); if (sel === t) sel = null; }
+  if (sel === t && t.plain) sel = null;
   if (fresh && fresh.o === t) fresh = null;
-  editStart = null; render();
+  render();
+}
+// every keystroke goes through here; a pause of 700ms starts a new undo group (one Cmd+Z = one typing burst)
+function onInput() {
+  if (!editing) return;
+  const now = Date.now();
+  if (now - lastInputAt > 700) pushUndo(lastJSON);
+  lastInputAt = now;
+  editing.text = ed.value; placeEd();
+  lastJSON = JSON.stringify(objects);
 }
 // single click on empty canvas: start typing right there at normal page size, no box
 function startPlain(p) {
   const before = JSON.stringify(objects);
-  const t = { type: 'text', plain: true, color: 'black', x: p.x - PAD, y: p.y - PAD - PLAIN_FS * LH / 2, w: 12 + 2 * PAD, h: PLAIN_FS * LH + 2 * PAD, text: '' };
+  const t = { id: oid(), type: 'text', plain: true, color: 'black', x: p.x - PAD, y: p.y - PAD - PLAIN_FS * LH / 2, w: 12 + 2 * PAD, h: PLAIN_FS * LH + 2 * PAD, text: '' };
   if (p === ORIGIN) t.doc = true;
   objects.push(t); fresh = { o: t, x: p.x, y: p.y, t0: Date.now() }; startEdit(t, before);
 }
@@ -281,11 +304,12 @@ function startPlain(p) {
 function typeInDoc(ch) {
   const t = (docText && objects.includes(docText)) ? docText : objects.find(o => o.type === 'text' && o.plain && o.doc);
   if (t) startEdit(t); else startPlain(ORIGIN);
-  ed.value += ch; editing.text = ed.value; placeEd(); ed.setSelectionRange(ed.value.length, ed.value.length);
+  ed.value += ch; onInput(); ed.setSelectionRange(ed.value.length, ed.value.length);
 }
-ed.addEventListener('input', () => { if (editing) { editing.text = ed.value; placeEd(); } });
+ed.addEventListener('input', onInput);
 ed.addEventListener('keydown', e => {
   e.stopPropagation();
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
   if (e.key === 'Escape') { e.preventDefault(); stopEdit(); return; }
   if (e.key === '/' && !e.metaKey && !e.ctrlKey) { // slash at the start of a word opens the shape menu, mid-word it is just a slash
     const i = ed.selectionStart; if (i === 0 || /\s/.test(ed.value[i - 1])) { e.preventDefault(); openPal(); }
@@ -298,8 +322,8 @@ function createText(p) {
   for (const o of objects) if (o.type === 'rect' && p.x >= o.x && p.x <= o.x + o.w && p.y >= o.y && p.y <= o.y + o.h) { if (!best || o.w * o.h < best.w * best.h) best = o; }
   const before = JSON.stringify(objects);
   let t;
-  if (best) { const m = Math.min(10, best.w * 0.1, best.h * 0.1); t = { type: 'text', color: 'black', x: best.x + m, y: best.y + m, w: Math.max(20, best.w - 2 * m), h: Math.max(16, best.h - 2 * m), text: '' }; }
-  else t = { type: 'text', color: 'black', x: p.x - 80, y: p.y - 20, w: 160, h: 40, text: '' };
+  if (best) { const m = Math.min(10, best.w * 0.1, best.h * 0.1); t = { id: oid(), type: 'text', color: 'black', x: best.x + m, y: best.y + m, w: Math.max(20, best.w - 2 * m), h: Math.max(16, best.h - 2 * m), text: '' }; }
+  else t = { id: oid(), type: 'text', color: 'black', x: p.x - 80, y: p.y - 20, w: 160, h: 40, text: '' };
   objects.push(t); startEdit(t, before);
 }
 
@@ -332,10 +356,10 @@ function choose(cmd) { const p = { x: +pal.dataset.x, y: +pal.dataset.y }; close
 function addShape(cmd, p) {
   if (cmd === 'text') { createText(p); return; }
   let o;
-  if (cmd === 'rectangle') o = { type: 'rect', color, x: p.x - 80, y: p.y - 50, w: 160, h: 100 };
-  else if (cmd === 'circle') o = { type: 'circle', color, x: p.x - 50, y: p.y - 50, w: 100, h: 100 };
-  else if (cmd === 'triangle') o = { type: 'triangle', color, x: p.x - 60, y: p.y - 50, w: 120, h: 100 };
-  else if (cmd === 'arrow') o = { type: 'arrow', color, x1: p.x - 75, y1: p.y, x2: p.x + 75, y2: p.y };
+  if (cmd === 'rectangle') o = { id: oid(), type: 'rect', color, x: p.x - 80, y: p.y - 50, w: 160, h: 100 };
+  else if (cmd === 'circle') o = { id: oid(), type: 'circle', color, x: p.x - 50, y: p.y - 50, w: 100, h: 100 };
+  else if (cmd === 'triangle') o = { id: oid(), type: 'triangle', color, x: p.x - 60, y: p.y - 50, w: 120, h: 100 };
+  else if (cmd === 'arrow') o = { id: oid(), type: 'arrow', color, x1: p.x - 75, y1: p.y, x2: p.x + 75, y2: p.y };
   else return;
   snapshot(); objects.push(o); sel = o; render();
 }
@@ -344,12 +368,13 @@ function addShape(cmd, p) {
 const pt = e => ({ x: e.clientX, y: e.clientY });
 cv.addEventListener('pointerdown', e => {
   if (e.button !== 0) return;
-  if (editing) stopEdit();
-  closePal();
   const p = pt(e);
+  const onHandle = editing && hitHandle(editing, p.x, p.y);
+  if (editing) stopEdit(!!onHandle);
+  closePal();
   try { cv.setPointerCapture(e.pointerId); } catch (_) {}
   const h = hitHandle(sel, p.x, p.y);
-  if (h) { snapshot(); drag = { kind: 'resize', h: h.id, o: sel, start: p, orig: clone(sel) }; return; }
+  if (h) { snapshot(); drag = { kind: 'resize', h: h.id, o: sel, start: p, orig: clone(sel), wasEmpty: sel.type === 'text' && !sel.text }; return; }
   const o = topHit(p.x, p.y);
   if (o) {
     sel = o; snapshot();
@@ -357,7 +382,7 @@ cv.addEventListener('pointerdown', e => {
     drag = { kind: 'move', o, start: p, orig: clone(o), kids, korig: kids.map(clone), moved: false }; render(); return;
   }
   sel = null;
-  const s = { type: 'stroke', color, points: [p] };
+  const s = { id: oid(), type: 'stroke', color, points: [p] };
   snapshot(); objects.push(s); drag = { kind: 'draw', o: s }; render();
 });
 addEventListener('pointermove', e => {
@@ -386,6 +411,8 @@ addEventListener('pointerup', e => {
   const d = drag; drag = null;
   if (d.kind === 'draw' && pathLen(d.o.points) < 3) { const i = objects.indexOf(d.o); if (i >= 0) objects.splice(i, 1); undoStack.pop(); }
   else if (d.kind === 'move' && !d.moved) { undoStack.pop(); if (d.o.type === 'text') startEdit(d.o); }
+  else if (d.kind === 'move' && d.o.plain) sel = null;
+  else if (d.kind === 'resize' && d.wasEmpty) startEdit(d.o);
   render();
   if (d.kind === 'draw' && !objects.includes(d.o)) startPlain(pt(e));
 });
@@ -394,7 +421,7 @@ cv.addEventListener('dblclick', e => {
   const p = pt(e);
   // the two clicks of a double-click each started an (empty) plain text; drop it and make a text box instead
   if (fresh && editing === fresh.o && !ed.value.trim() && Math.hypot(p.x - fresh.x, p.y - fresh.y) < 10 && Date.now() - fresh.t0 < 1000) {
-    const t = fresh.o; editing = null; fresh = null; editStart = null; ed.style.display = 'none';
+    const t = fresh.o; editing = null; fresh = null; ed.style.display = 'none';
     const i = objects.indexOf(t); if (i >= 0) objects.splice(i, 1);
     createText(p); return;
   }
