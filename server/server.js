@@ -1,10 +1,10 @@
-// Scratchpad command API: turns a plain-English instruction into canvas operations using Claude.
+// Scratchpad command API: turns a plain-English instruction into canvas operations using an Azure OpenAI deployment.
 import http from "node:http";
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 
-const client = new Anthropic(); // ANTHROPIC_API_KEY from the environment
-const MODEL = process.env.MODEL || "claude-opus-5-5";
-const EFFORT = process.env.EFFORT || "medium";
+// Azure OpenAI's OpenAI-compatible endpoint: base URL like https://<resource>.services.ai.azure.com/openai/v1, model = deployment name
+const client = new OpenAI({ apiKey: process.env.AZURE_OPENAI_API_KEY, baseURL: process.env.AZURE_OPENAI_BASE_URL });
+const MODEL = process.env.MODEL || "gpt-6-luna";
 const PORT = Number(process.env.PORT || 8787);
 const ALLOWED = (process.env.ALLOWED_ORIGINS || "https://scratchpad-pos0.onrender.com").split(",").map(s => s.trim()).filter(Boolean);
 const PER_IP_PER_MIN = 30, GLOBAL_PER_HOUR = 600;
@@ -87,25 +87,22 @@ http.createServer(async (req, res) => {
     ].join("\n\n");
     const t0 = Date.now();
     try {
-      const resp = await client.beta.messages.create({
-        model: MODEL, max_tokens: 16000,
-        betas: ["server-side-fallback-2026-07-01"], fallbacks: "default",
-        output_config: { effort: EFFORT },
-        system: SYSTEM,
-        messages: [{ role: "user", content: user }],
+      const resp = await client.chat.completions.create({
+        model: MODEL,
+        messages: [{ role: "system", content: SYSTEM }, { role: "user", content: user }],
+        response_format: { type: "json_object" },
       });
-      if (resp.stop_reason === "refusal") return send(res, 200, { reply: "I can't do that one.", ops: [] }, origin);
-      const text = resp.content.filter(b => b.type === "text").map(b => b.text).join("");
+      const text = resp.choices?.[0]?.message?.content || "";
       let out;
       try { out = extractJSON(text); } catch { return send(res, 502, { error: "model reply was not valid JSON", raw: text.slice(0, 500) }, origin); }
       const ops = Array.isArray(out.ops) ? out.ops : [];
-      console.log(JSON.stringify({ ms: Date.now() - t0, model: resp.model, in: resp.usage?.input_tokens, out: resp.usage?.output_tokens, ops: ops.length, instruction: instruction.slice(0, 120) }));
+      console.log(JSON.stringify({ ms: Date.now() - t0, model: resp.model, in: resp.usage?.prompt_tokens, out: resp.usage?.completion_tokens, ops: ops.length, instruction: instruction.slice(0, 120) }));
       return send(res, 200, { reply: String(out.reply || "done"), ops }, origin);
     } catch (e) {
-      const detail = e?.error?.error?.message || e?.message || "model call failed";
+      const detail = e?.error?.message || e?.message || "model call failed";
       console.error("command failed", e?.status, detail);
-      const friendly = /credit balance/i.test(detail) ? "the Anthropic account behind this site has no API credit; add credit and try again" : detail;
+      const friendly = e?.status === 401 || e?.status === 403 ? "the Azure OpenAI key was rejected" : e?.status === 429 ? "Azure OpenAI is rate-limiting; try again in a moment" : detail;
       return send(res, e?.status === 429 ? 429 : 502, { error: friendly }, origin);
     }
   });
-}).listen(PORT, () => console.log(`scratchpad api on :${PORT} model=${MODEL} effort=${EFFORT} origins=${ALLOWED.join(",")}`));
+}).listen(PORT, () => console.log(`scratchpad api on :${PORT} model=${MODEL} base=${process.env.AZURE_OPENAI_BASE_URL || "(unset)"} origins=${ALLOWED.join(",")}`));

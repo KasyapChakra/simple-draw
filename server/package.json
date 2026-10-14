@@ -3,7 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
-  "scripts": { "start": "node server.js" },
-  "dependencies": { "@anthropic-ai/sdk": "latest" }
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "openai": "^7.32.0"
+  }
 }
