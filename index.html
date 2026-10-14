@@ -25,6 +25,11 @@
   #pal .opt.hi { background:#eef3ff; }
   #ed { position:fixed; display:none; border:0; outline:0; background:transparent; resize:none; overflow:hidden;
     padding:0; margin:0; color:#111; line-height:1.25; white-space:pre-wrap; overflow-wrap:break-word; z-index:5; }
+  #ask { position:fixed; top:12px; left:12px; right:400px; max-width:720px; display:flex; align-items:center; gap:8px; z-index:10; }
+  #askin { flex:1; min-width:140px; font-size:14px; font-family:inherit; padding:7px 12px; border:1px solid #e5e5e5; border-radius:10px;
+    box-shadow:0 2px 8px rgba(0,0,0,.06); outline:none; background:#fff; color:#111; }
+  #askin:focus { border-color:#4c8dff; }
+  #askst { font-size:12px; color:#888; white-space:nowrap; max-width:260px; overflow:hidden; text-overflow:ellipsis; }
   #hint { position:fixed; left:12px; bottom:10px; font-size:12px; color:#999; user-select:none; pointer-events:none; }
   #toast { position:fixed; top:60px; right:16px; background:#111; color:#fff; font-size:13px; padding:6px 10px;
     border-radius:6px; opacity:0; transition:opacity .2s; pointer-events:none; z-index:30; }
@@ -34,6 +39,7 @@
 <canvas id="c"></canvas>
 <textarea id="ed" spellcheck="false"></textarea>
 <div id="pal"><input id="palin" placeholder="rectangle, circle, triangle, arrow, text" autocomplete="off"><div id="palopts"></div></div>
+<form id="ask" autocomplete="off"><input id="askin" placeholder="Tell it what to do: add a red circle, label the boxes, connect them, clear, undo…"><span id="askst"></span></form>
 <div id="bar"></div>
 <div id="hint">just type &middot; click to type elsewhere &middot; double-click for a text box &middot; drag to draw &middot; / for shapes &middot; &#9003; deletes &middot; &#8984;Z undo</div>
 <div id="toast"></div>
@@ -44,13 +50,15 @@ const COLORS = [['black','#111111'],['red','#e03131'],['blue','#1c7ed6'],['green
 const HEX = Object.fromEntries(COLORS);
 const FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
 const LW = 2.5, PAD = 6, LH = 1.25, HIT = 8, HS = 8, PLAIN_FS = 16;
-const ORIGIN = { x: 40, y: 40 + PLAIN_FS * LH / 2 }; // where the page's own text starts, like a doc
+const ORIGIN = { x: 40, y: 76 + PLAIN_FS * LH / 2 }; // where the page's own text starts, like a doc (below the prompt bar)
+const API = (location.protocol === 'file:' || /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) ? 'http://localhost:8787' : 'API_URL_PLACEHOLDER';
 const CMDS = ['rectangle','circle','triangle','arrow','text'];
 
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const ed = document.getElementById('ed'), pal = document.getElementById('pal');
 const palin = document.getElementById('palin'), palopts = document.getElementById('palopts');
 const bar = document.getElementById('bar'), toast = document.getElementById('toast');
+const askForm = document.getElementById('ask'), askin = document.getElementById('askin'), askst = document.getElementById('askst');
 
 let objects = [], sel = null, color = 'black';
 let mouse = { x: innerWidth / 2, y: innerHeight / 2 };
@@ -65,13 +73,10 @@ COLORS.forEach(([name, hex], i) => {
   const d = document.createElement('div');
   d.className = 'sw' + (i === 0 ? ' on' : ''); d.style.background = hex; d.title = name;
   d.onmousedown = e => e.preventDefault();
-  d.onclick = () => {
-    color = name;
-    bar.querySelectorAll('.sw').forEach((el, j) => el.classList.toggle('on', j === i));
-    if (sel && sel.type !== 'text') { snapshot(); sel.color = name; render(); }
-  };
+  d.onclick = () => { setPen(name); if (sel && sel.type !== 'text') { snapshot(); sel.color = name; render(); } };
   bar.appendChild(d);
 });
+function setPen(name) { if (!HEX[name]) return; color = name; bar.querySelectorAll('.sw').forEach(el => el.classList.toggle('on', el.title === name)); }
 const mkBtn = (label, title, fn) => {
   const b = document.createElement('button'); b.textContent = label; b.title = title;
   b.onmousedown = e => e.preventDefault(); b.onclick = fn; bar.appendChild(b); return b;
@@ -433,9 +438,10 @@ cv.addEventListener('dblclick', e => {
 
 // ---------- keyboard ----------
 addEventListener('keydown', e => {
-  if (e.target === palin || e.target === ed) return;
+  if (e.target === palin || e.target === ed || e.target === askin) return;
   const meta = e.metaKey || e.ctrlKey;
   if (meta && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
+  if (meta && e.key.toLowerCase() === 'k') { e.preventDefault(); if (editing) stopEdit(); askin.focus(); return; }
   if (meta) return;
   if (e.key === '/') { e.preventDefault(); openPal(); return; }
   if (e.key === 'Escape') { closePal(); sel = null; render(); return; }
@@ -519,10 +525,98 @@ async function copyDesc() {
   showToast(objects.length ? 'Copied diagram as text' : 'Copied (canvas is empty)');
 }
 
+// ---------- prompt bar: natural-language commands run by Claude through the small API server ----------
+let busy = false;
+askForm.addEventListener('submit', e => { e.preventDefault(); const t = askin.value.trim(); if (t && !busy) runCommand(t); });
+askin.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Escape') { askin.blur(); askst.textContent = ''; } });
+fetch(API + '/health').catch(() => {}); // wake the free-tier server early so the first command is quick
+const view = o => { // what the model sees: everything, except stroke points are summarised
+  const r = v => (typeof v === 'number' ? Math.round(v) : v);
+  if (o.type === 'stroke') { const b = bbox(o); return { id: o.id, type: 'stroke', color: o.color, bbox: { x: r(b.x), y: r(b.y), w: r(b.w), h: r(b.h) }, points: o.points.length }; }
+  return Object.fromEntries(Object.entries(o).map(([k, v]) => [k, r(v)]));
+};
+async function runCommand(text) {
+  if (editing) stopEdit();
+  closePal(); busy = true; askst.textContent = 'thinking…';
+  const body = { instruction: text, canvas: { w: innerWidth, h: innerHeight }, pen: color, selected: sel ? sel.id : null, mouse: { x: mouse.x, y: mouse.y }, objects: objects.map(view) };
+  try {
+    const res = await fetch(API + '/api/command', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    applyOps(Array.isArray(data.ops) ? data.ops : []);
+    askst.textContent = data.reply || 'done'; askin.value = '';
+  } catch (e) { askst.textContent = 'error: ' + (e.message || e); }
+  busy = false;
+}
+const byId = id => objects.find(o => o.id === Number(id));
+const num = (v, d) => (Number.isFinite(Number(v)) && v !== null && v !== '' ? Number(v) : d);
+const TYPE_ALIAS = { rect: 'rect', rectangle: 'rect', box: 'rect', square: 'rect', circle: 'circle', ellipse: 'circle', oval: 'circle', triangle: 'triangle', arrow: 'arrow', line: 'arrow', text: 'text', label: 'text', stroke: 'stroke', freehand: 'stroke', path: 'stroke' };
+function edgePoint(b, to) { // point on the box border, 4px out, in the direction of `to`
+  const cx = b.x + b.w / 2, cy = b.y + b.h / 2, dx = to.x - cx, dy = to.y - cy, L = Math.hypot(dx, dy);
+  if (!L) return { x: cx, y: cy };
+  const s = Math.min(dx ? (b.w / 2) / Math.abs(dx) : Infinity, dy ? (b.h / 2) / Math.abs(dy) : Infinity);
+  return { x: cx + dx * s + 4 * dx / L, y: cy + dy * s + 4 * dy / L };
+}
+function attachArrow(a, fromId, toId) {
+  const f = fromId != null ? byId(fromId) : null, t = toId != null ? byId(toId) : null;
+  const c = o => { const b = bbox(o); return { x: b.x + b.w / 2, y: b.y + b.h / 2 }; };
+  const cf = f ? c(f) : { x: a.x1, y: a.y1 }, ct = t ? c(t) : { x: a.x2, y: a.y2 };
+  if (f) { const p = edgePoint(bbox(f), ct); a.x1 = p.x; a.y1 = p.y; } else { a.x1 = cf.x; a.y1 = cf.y; }
+  if (t) { const p = edgePoint(bbox(t), cf); a.x2 = p.x; a.y2 = p.y; } else { a.x2 = ct.x; a.y2 = ct.y; }
+}
+function fitInside(t, host) {
+  const b = bbox(host), m = Math.min(10, b.w * 0.1, b.h * 0.1);
+  t.plain = false; t.x = b.x + m; t.y = b.y + m; t.w = Math.max(20, b.w - 2 * m); t.h = Math.max(16, b.h - 2 * m);
+}
+function applySet(o, set) {
+  for (const [k, v] of Object.entries(set || {})) {
+    if (k === 'color') { if (HEX[v] && o.type !== 'text') o.color = v; }
+    else if (k === 'text') o.text = String(v ?? '');
+    else if (k === 'plain') o.plain = !!v;
+    else if (k === 'type') { const nt = TYPE_ALIAS[String(v).toLowerCase()]; if (nt && ['rect', 'circle', 'triangle'].includes(nt) && ['rect', 'circle', 'triangle'].includes(o.type)) o.type = nt; }
+    else if (k === 'points' && o.type === 'stroke' && Array.isArray(v)) { const P = v.map(p => ({ x: num(p.x, NaN), y: num(p.y, NaN) })).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y)); if (P.length >= 2) o.points = P; }
+    else if (['x', 'y', 'w', 'h', 'x1', 'y1', 'x2', 'y2'].includes(k)) { const n = num(v, null); if (n !== null) o[k] = (k === 'w' || k === 'h') ? Math.max(10, n) : n; }
+  }
+  if (set.dx != null || set.dy != null) moveTo(o, clone(o), num(set.dx, 0), num(set.dy, 0));
+  if (o.type === 'arrow' && (set.from != null || set.to != null)) attachArrow(o, set.from, set.to);
+  if (o.type === 'text' && set.inside != null && byId(set.inside)) fitInside(o, byId(set.inside));
+}
+function makeObject(spec) {
+  const type = TYPE_ALIAS[String(spec.type || '').toLowerCase()]; if (!type) return null;
+  const o = { id: oid(), type, color: type === 'text' ? 'black' : (HEX[spec.color] ? spec.color : color) };
+  if (type === 'arrow') { o.x1 = num(spec.x1, 0); o.y1 = num(spec.y1, 0); o.x2 = num(spec.x2, o.x1 + 150); o.y2 = num(spec.y2, o.y1); if (spec.from != null || spec.to != null) attachArrow(o, spec.from, spec.to); }
+  else if (type === 'stroke') { o.points = (spec.points || []).map(p => ({ x: num(p.x, NaN), y: num(p.y, NaN) })).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y)); if (o.points.length < 2) return null; }
+  else if (type === 'text') {
+    o.text = String(spec.text ?? '');
+    if (spec.inside != null && byId(spec.inside)) { o.x = o.y = 0; o.w = o.h = 20; fitInside(o, byId(spec.inside)); }
+    else if (spec.plain || (spec.w == null && spec.h == null)) { o.plain = true; o.x = num(spec.x, 40) - PAD; o.y = num(spec.y, 100) - PAD; o.w = 20; o.h = 20; }
+    else { o.x = num(spec.x, 0); o.y = num(spec.y, 0); o.w = Math.max(10, num(spec.w, 160)); o.h = Math.max(10, num(spec.h, 40)); }
+  } else { o.x = num(spec.x, 0); o.y = num(spec.y, 0); o.w = Math.max(10, num(spec.w, 160)); o.h = Math.max(10, num(spec.h, 90)); }
+  return o;
+}
+function applyOps(ops) { // one undo step for the whole command
+  let snapped = false; const ensure = () => { if (!snapped) { snapshot(); snapped = true; } };
+  for (const op of ops) {
+    const kind = String(op.op || op.action || '').toLowerCase();
+    if (kind === 'add') { const o = makeObject(op.object || op); if (o) { ensure(); objects.push(o); sel = o; } }
+    else if (kind === 'update') { const o = byId(op.id); if (o) { ensure(); applySet(o, op.set || op.changes || op); } }
+    else if (kind === 'delete') { const ids = new Set((op.ids || [op.id]).map(Number)); ensure(); objects = objects.filter(o => !ids.has(o.id)); if (sel && ids.has(sel.id)) sel = null; }
+    else if (kind === 'clear') { ensure(); objects = []; sel = null; }
+    else if (kind === 'undo') { undo(); snapped = false; }
+    else if (kind === 'redo') { redo(); snapped = false; }
+    else if (kind === 'select') { const o = byId(op.id); if (o) sel = o; }
+    else if (kind === 'pen') setPen(String(op.color || '').toLowerCase());
+    else if (kind === 'download') exportPNG();
+    else if (kind === 'copy') copyDesc();
+  }
+  if (sel && sel.plain) sel = null;
+  render();
+}
+
 addEventListener('resize', fit);
 fit();
 startPlain(ORIGIN); // the page opens like a blank doc: caret at the top-left, just type
-window.__draw = { get objects() { return objects; }, describe, undo };
+window.__draw = { get objects() { return objects; }, describe, undo, applyOps, runCommand };
 })();
 </script>
 </body>
