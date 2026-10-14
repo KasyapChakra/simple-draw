@@ -35,7 +35,7 @@
 <textarea id="ed" spellcheck="false"></textarea>
 <div id="pal"><input id="palin" placeholder="rectangle, circle, triangle, arrow, text" autocomplete="off"><div id="palopts"></div></div>
 <div id="bar"></div>
-<div id="hint">drag to draw &middot; type / for shapes &middot; double-click for text &middot; &#9003; deletes &middot; &#8984;Z undo</div>
+<div id="hint">just type &middot; click to type elsewhere &middot; double-click for a text box &middot; drag to draw &middot; / for shapes &middot; &#9003; deletes &middot; &#8984;Z undo</div>
 <div id="toast"></div>
 <script>
 (() => {
@@ -43,7 +43,8 @@
 const COLORS = [['black','#111111'],['red','#e03131'],['blue','#1c7ed6'],['green','#2f9e44'],['orange','#f08c00']];
 const HEX = Object.fromEntries(COLORS);
 const FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
-const LW = 2.5, PAD = 6, LH = 1.25, HIT = 8, HS = 8;
+const LW = 2.5, PAD = 6, LH = 1.25, HIT = 8, HS = 8, PLAIN_FS = 16;
+const ORIGIN = { x: 40, y: 40 + PLAIN_FS * LH / 2 }; // where the page's own text starts, like a doc
 const CMDS = ['rectangle','circle','triangle','arrow','text'];
 
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
@@ -54,7 +55,7 @@ const bar = document.getElementById('bar'), toast = document.getElementById('toa
 let objects = [], sel = null, color = 'black';
 let mouse = { x: innerWidth / 2, y: innerHeight / 2 };
 let undoStack = [], redoStack = [];
-let drag = null, editing = null, editStart = null, dpr = 1;
+let drag = null, editing = null, editStart = null, dpr = 1, fresh = null, docText = null;
 let palHi = 0, palList = [];
 
 // ---------- toolbar ----------
@@ -122,6 +123,7 @@ function hitObj(o, px, py) {
   return false;
 }
 function handles(o) {
+  if (o.type === 'text' && o.plain) return [];
   if (o.type === 'arrow') return [{ id: 'p1', x: o.x1, y: o.y1, cur: 'move' }, { id: 'p2', x: o.x2, y: o.y2, cur: 'move' }];
   const { x, y, w, h } = bbox(o);
   return [
@@ -174,6 +176,19 @@ function fitFont(t) {
   return lo;
 }
 
+function plainMaxW(t) { return Math.max(60, Math.min(820, innerWidth - t.x - 2 * PAD - 40)); }
+function layoutText(t) {
+  if (t.plain) {
+    const maxW = plainMaxW(t), lines = wrapLines(t.text, PLAIN_FS, maxW);
+    ctx.font = PLAIN_FS + 'px ' + FONT;
+    let w = 0; for (const ln of lines) w = Math.max(w, ctx.measureText(ln).width);
+    t.w = Math.max(12, Math.ceil(w)) + 2 * PAD; t.h = lines.length * PLAIN_FS * LH + 2 * PAD;
+    return { fs: PLAIN_FS, lines, maxW, cw: Math.ceil(w) };
+  }
+  const fs = fitFont(t);
+  return { fs, lines: wrapLines(t.text, fs, Math.max(1, t.w - 2 * PAD)), maxW: Math.max(1, t.w - 2 * PAD) };
+}
+
 // ---------- rendering ----------
 function fit() { dpr = devicePixelRatio || 1; cv.width = innerWidth * dpr; cv.height = innerHeight * dpr; cv.style.width = innerWidth + 'px'; cv.style.height = innerHeight + 'px'; render(); }
 function render() {
@@ -211,7 +226,7 @@ function drawArrow(c, o, ox, oy) {
   c.closePath(); c.fill();
 }
 function drawText(c, o, ox, oy) {
-  const fs = fitFont(o), lines = wrapLines(o.text, fs, Math.max(1, o.w - 2 * PAD));
+  const { fs, lines } = layoutText(o);
   c.font = fs + 'px ' + FONT; c.fillStyle = '#111'; c.textBaseline = 'top';
   let y = o.y + oy + PAD + fs * (LH - 1) / 2;
   for (const ln of lines) { c.fillText(ln, o.x + ox + PAD, y); y += fs * LH; }
@@ -227,16 +242,22 @@ function drawSel(c, o) {
 // ---------- text editing ----------
 function placeEd() {
   const t = editing; if (!t) return;
-  const fs = fitFont(t);
+  const { fs, lines, maxW, cw } = layoutText(t);
   ed.style.left = (t.x + PAD) + 'px'; ed.style.top = (t.y + PAD) + 'px';
-  ed.style.width = Math.max(4, t.w - 2 * PAD) + 'px'; ed.style.height = Math.max(4, t.h - 2 * PAD) + 'px';
   ed.style.fontSize = fs + 'px'; ed.style.fontFamily = FONT;
+  if (t.plain) {
+    // textarea hugs the typed text so clicks inside it place the caret, clicks beside it reach the canvas
+    ed.style.width = Math.min(maxW, cw + 4) + 'px'; ed.style.height = ((lines.length + 1) * fs * LH) + 'px';
+    ed.style.pointerEvents = t.text ? 'auto' : 'none';
+  }
+  else { ed.style.width = Math.max(4, t.w - 2 * PAD) + 'px'; ed.style.height = Math.max(4, t.h - 2 * PAD) + 'px'; ed.style.pointerEvents = 'auto'; }
 }
 function startEdit(t, before) {
   if (editing === t) return;
   if (editing) stopEdit();
   closePal();
   editing = t; sel = t; editStart = before || JSON.stringify(objects);
+  if (t.plain) docText = t;
   ed.value = t.text; ed.style.display = 'block'; placeEd(); render();
   ed.focus(); ed.setSelectionRange(ed.value.length, ed.value.length);
 }
@@ -246,10 +267,30 @@ function stopEdit() {
   t.text = ed.value.replace(/\s+$/, '');
   if (!t.text.trim()) { const i = objects.indexOf(t); if (i >= 0) objects.splice(i, 1); if (sel === t) sel = null; }
   if (JSON.stringify(objects) !== editStart) pushUndo(editStart);
+  if (fresh && fresh.o === t) fresh = null;
   editStart = null; render();
 }
+// single click on empty canvas: start typing right there at normal page size, no box
+function startPlain(p) {
+  const before = JSON.stringify(objects);
+  const t = { type: 'text', plain: true, color: 'black', x: p.x - PAD, y: p.y - PAD - PLAIN_FS * LH / 2, w: 12 + 2 * PAD, h: PLAIN_FS * LH + 2 * PAD, text: '' };
+  if (p === ORIGIN) t.doc = true;
+  objects.push(t); fresh = { o: t, x: p.x, y: p.y, t0: Date.now() }; startEdit(t, before);
+}
+// typing with nothing focused continues the page text (last plain text edited, else the doc text at top-left, else a new one)
+function typeInDoc(ch) {
+  const t = (docText && objects.includes(docText)) ? docText : objects.find(o => o.type === 'text' && o.plain && o.doc);
+  if (t) startEdit(t); else startPlain(ORIGIN);
+  ed.value += ch; editing.text = ed.value; placeEd(); ed.setSelectionRange(ed.value.length, ed.value.length);
+}
 ed.addEventListener('input', () => { if (editing) { editing.text = ed.value; placeEd(); } });
-ed.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Escape') { e.preventDefault(); stopEdit(); } });
+ed.addEventListener('keydown', e => {
+  e.stopPropagation();
+  if (e.key === 'Escape') { e.preventDefault(); stopEdit(); return; }
+  if (e.key === '/' && !e.metaKey && !e.ctrlKey) { // slash at the start of a word opens the shape menu, mid-word it is just a slash
+    const i = ed.selectionStart; if (i === 0 || /\s/.test(ed.value[i - 1])) { e.preventDefault(); openPal(); }
+  }
+});
 ed.addEventListener('blur', () => { if (editing) stopEdit(); });
 
 function createText(p) {
@@ -346,10 +387,18 @@ addEventListener('pointerup', e => {
   if (d.kind === 'draw' && pathLen(d.o.points) < 3) { const i = objects.indexOf(d.o); if (i >= 0) objects.splice(i, 1); undoStack.pop(); }
   else if (d.kind === 'move' && !d.moved) { undoStack.pop(); if (d.o.type === 'text') startEdit(d.o); }
   render();
+  if (d.kind === 'draw' && !objects.includes(d.o)) startPlain(pt(e));
 });
 addEventListener('pointercancel', () => { drag = null; render(); });
 cv.addEventListener('dblclick', e => {
-  const p = pt(e), o = topHit(p.x, p.y);
+  const p = pt(e);
+  // the two clicks of a double-click each started an (empty) plain text; drop it and make a text box instead
+  if (fresh && editing === fresh.o && !ed.value.trim() && Math.hypot(p.x - fresh.x, p.y - fresh.y) < 10 && Date.now() - fresh.t0 < 1000) {
+    const t = fresh.o; editing = null; fresh = null; editStart = null; ed.style.display = 'none';
+    const i = objects.indexOf(t); if (i >= 0) objects.splice(i, 1);
+    createText(p); return;
+  }
+  const o = topHit(p.x, p.y);
   if (o && o.type === 'text') { startEdit(o); return; }
   if (o) return;
   createText(p);
@@ -363,11 +412,12 @@ addEventListener('keydown', e => {
   if (meta) return;
   if (e.key === '/') { e.preventDefault(); openPal(); return; }
   if (e.key === 'Escape') { closePal(); sel = null; render(); return; }
-  if (!sel) return;
+  if (!sel) { if (e.key.length === 1) { e.preventDefault(); typeInDoc(e.key); } return; }
   if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); snapshot(); objects.splice(objects.indexOf(sel), 1); sel = null; render(); return; }
   if (e.key === 'Enter' && sel.type === 'text') { e.preventDefault(); startEdit(sel); return; }
   const step = e.shiftKey ? 10 : 1, mv = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
-  if (mv) { e.preventDefault(); snapshot(); moveTo(sel, clone(sel), mv[0], mv[1]); render(); }
+  if (mv) { e.preventDefault(); snapshot(); moveTo(sel, clone(sel), mv[0], mv[1]); render(); return; }
+  if (e.key.length === 1) { e.preventDefault(); typeInDoc(e.key); }
 });
 
 // ---------- export ----------
@@ -444,6 +494,7 @@ async function copyDesc() {
 
 addEventListener('resize', fit);
 fit();
+startPlain(ORIGIN); // the page opens like a blank doc: caret at the top-left, just type
 window.__draw = { get objects() { return objects; }, describe, undo };
 })();
 </script>
