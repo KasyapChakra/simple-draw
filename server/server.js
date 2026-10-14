@@ -102,8 +102,10 @@ http.createServer(async (req, res) => {
       console.log(JSON.stringify({ ms: Date.now() - t0, model: resp.model, in: resp.usage?.input_tokens, out: resp.usage?.output_tokens, ops: ops.length, instruction: instruction.slice(0, 120) }));
       return send(res, 200, { reply: String(out.reply || "done"), ops }, origin);
     } catch (e) {
-      console.error("command failed", e?.status, e?.message);
-      return send(res, e?.status === 429 ? 429 : 502, { error: e?.message || "model call failed" }, origin);
+      const detail = e?.error?.error?.message || e?.message || "model call failed";
+      console.error("command failed", e?.status, detail);
+      const friendly = /credit balance/i.test(detail) ? "the Anthropic account behind this site has no API credit; add credit and try again" : detail;
+      return send(res, e?.status === 429 ? 429 : 502, { error: friendly }, origin);
     }
   });
 }).listen(PORT, () => console.log(`scratchpad api on :${PORT} model=${MODEL} effort=${EFFORT} origins=${ALLOWED.join(",")}`));

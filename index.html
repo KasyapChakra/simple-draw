@@ -51,7 +51,7 @@ const HEX = Object.fromEntries(COLORS);
 const FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
 const LW = 2.5, PAD = 6, LH = 1.25, HIT = 8, HS = 8, PLAIN_FS = 16;
 const ORIGIN = { x: 40, y: 76 + PLAIN_FS * LH / 2 }; // where the page's own text starts, like a doc (below the prompt bar)
-const API = (location.protocol === 'file:' || /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) ? 'http://localhost:8787' : 'API_URL_PLACEHOLDER';
+const API = (location.protocol === 'file:' || /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) ? 'http://localhost:8787' : 'https://scratchpad-api-3udy.onrender.com';
 const CMDS = ['rectangle','circle','triangle','arrow','text'];
 
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
