@@ -41,7 +41,7 @@
 <div id="pal"><input id="palin" placeholder="rectangle, circle, triangle, arrow, text" autocomplete="off"><div id="palopts"></div></div>
 <form id="ask" autocomplete="off"><input id="askin" placeholder="Tell it what to do: add a red circle, label the boxes, connect them, clear, undo…"><span id="askst"></span></form>
 <div id="bar"></div>
-<div id="hint">just type &middot; click to type elsewhere &middot; double-click for a text box &middot; drag to draw &middot; / for shapes &middot; &#9003; deletes &middot; &#8984;Z undo</div>
+<div id="hint">just type &middot; click to type elsewhere &middot; double-click for a text box &middot; drag to select &middot; / for shapes &middot; &#9003; deletes &middot; &#8984;Z undo</div>
 <div id="toast"></div>
 <script>
 (() => {
@@ -60,7 +60,8 @@ const palin = document.getElementById('palin'), palopts = document.getElementByI
 const bar = document.getElementById('bar'), toast = document.getElementById('toast');
 const askForm = document.getElementById('ask'), askin = document.getElementById('askin'), askst = document.getElementById('askst');
 
-let objects = [], sel = null, color = 'black';
+let objects = [], sels = [], color = 'black'; // sels = currently selected objects
+const one = () => (sels.length === 1 ? sels[0] : null); // the single selected object (handles/resize only then)
 let mouse = { x: innerWidth / 2, y: innerHeight / 2 };
 let undoStack = [], redoStack = [];
 let drag = null, editing = null, dpr = 1, fresh = null, docText = null;
@@ -73,7 +74,7 @@ COLORS.forEach(([name, hex], i) => {
   const d = document.createElement('div');
   d.className = 'sw' + (i === 0 ? ' on' : ''); d.style.background = hex; d.title = name;
   d.onmousedown = e => e.preventDefault();
-  d.onclick = () => { setPen(name); if (sel && sel.type !== 'text') { snapshot(); sel.color = name; render(); } };
+  d.onclick = () => { setPen(name); const targets = sels.filter(o => o.type !== 'text'); if (targets.length) { snapshot(); targets.forEach(o => o.color = name); render(); } };
   bar.appendChild(d);
 });
 function setPen(name) { if (!HEX[name]) return; color = name; bar.querySelectorAll('.sw').forEach(el => el.classList.toggle('on', el.title === name)); }
@@ -84,7 +85,7 @@ const mkBtn = (label, title, fn) => {
 const sep = document.createElement('div'); sep.className = 'sep'; bar.appendChild(sep);
 mkBtn('Copy', 'Copy the diagram as plain text (shapes, labels, arrows) for pasting into Claude Code', copyDesc);
 mkBtn('Download', 'Download the diagram as a PNG image', exportPNG);
-mkBtn('Clear', 'Clear the canvas (undo with ⌘Z)', () => { if (editing) stopEdit(); if (!objects.length) return; snapshot(); objects = []; sel = null; render(); });
+mkBtn('Clear', 'Clear the canvas (undo with ⌘Z)', () => { if (editing) stopEdit(); if (!objects.length) return; snapshot(); objects = []; sels = []; render(); });
 
 function showToast(msg) { toast.textContent = msg; toast.style.opacity = 1; clearTimeout(showToast.t); showToast.t = setTimeout(() => toast.style.opacity = 0, 1400); }
 
@@ -93,10 +94,10 @@ function pushUndo(json) { undoStack.push(json); if (undoStack.length > 200) undo
 function snapshot() { pushUndo(JSON.stringify(objects)); }
 function restoreState(json) {
   const wasEditing = editing ? editing.id : null;
-  objects = JSON.parse(json); sel = null;
+  objects = JSON.parse(json); sels = [];
   if (wasEditing != null) {
     const t = objects.find(o => o.id === wasEditing && o.type === 'text');
-    if (t) { editing = t; sel = t; ed.value = t.text; placeEd(); ed.focus(); ed.setSelectionRange(ed.value.length, ed.value.length); }
+    if (t) { editing = t; sels = [t]; ed.value = t.text; placeEd(); ed.focus(); ed.setSelectionRange(ed.value.length, ed.value.length); }
     else { editing = null; fresh = null; ed.style.display = 'none'; }
   }
   lastJSON = JSON.stringify(objects); lastInputAt = 0;
@@ -128,7 +129,7 @@ function nearPoly(px, py, pts) {
   return false;
 }
 function hitObj(o, px, py) {
-  if (o.type === 'stroke') return false;
+  if (o.type === 'stroke') { const P = o.points; for (let i = 1; i < P.length; i++) if (dseg(px, py, P[i - 1].x, P[i - 1].y, P[i].x, P[i].y) <= HIT) return true; return false; }
   if (o.type === 'text') return px >= o.x && px <= o.x + o.w && py >= o.y && py <= o.y + o.h;
   if (o.type === 'arrow') return dseg(px, py, o.x1, o.y1, o.x2, o.y2) <= HIT;
   if (o.type === 'rect') return nearPoly(px, py, [[o.x, o.y], [o.x + o.w, o.y], [o.x + o.w, o.y + o.h], [o.x, o.y + o.h]]);
@@ -141,7 +142,7 @@ function hitObj(o, px, py) {
   return false;
 }
 function handles(o) {
-  if (o.type === 'text' && o.plain) return [];
+  if ((o.type === 'text' && o.plain) || o.type === 'stroke') return [];
   if (o.type === 'arrow') return [{ id: 'p1', x: o.x1, y: o.y1, cur: 'move' }, { id: 'p2', x: o.x2, y: o.y2, cur: 'move' }];
   const { x, y, w, h } = bbox(o);
   return [
@@ -213,7 +214,9 @@ function render() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, innerWidth, innerHeight);
   drawScene(ctx, objects, 0, 0, editing);
-  if (sel && objects.includes(sel)) drawSel(ctx, sel);
+  sels = sels.filter(o => objects.includes(o));
+  for (const o of sels) drawSel(ctx, o, sels.length === 1);
+  if (drag && drag.kind === 'box') drawMarquee(ctx);
 }
 function drawScene(c, objs, ox, oy, skipText) {
   c.lineCap = 'round'; c.lineJoin = 'round'; c.lineWidth = LW;
@@ -249,13 +252,16 @@ function drawText(c, o, ox, oy) {
   let y = o.y + oy + PAD + fs * (LH - 1) / 2;
   for (const ln of lines) { c.fillText(ln, o.x + ox + PAD, y); y += fs * LH; }
 }
-function drawSel(c, o) {
-  if (o.plain) return;
+function drawSel(c, o, withHandles) {
+  if (o === editing && o.plain) return; // no box while typing plain text
   c.save(); c.lineWidth = 1; c.strokeStyle = '#4c8dff'; c.setLineDash([4, 3]);
-  const b = bbox(o); if (o.type !== 'arrow') c.strokeRect(b.x - 0.5, b.y - 0.5, b.w + 1, b.h + 1);
-  c.setLineDash([]); c.fillStyle = '#fff';
-  for (const h of handles(o)) { c.fillRect(h.x - 4, h.y - 4, 8, 8); c.strokeRect(h.x - 3.5, h.y - 3.5, 7, 7); }
+  const b = bbox(o); if (o.type !== 'arrow' || !withHandles) c.strokeRect(b.x - 0.5, b.y - 0.5, b.w + 1, b.h + 1);
+  if (withHandles) { c.setLineDash([]); c.fillStyle = '#fff'; for (const h of handles(o)) { c.fillRect(h.x - 4, h.y - 4, 8, 8); c.strokeRect(h.x - 3.5, h.y - 3.5, 7, 7); } }
   c.restore();
+}
+function drawMarquee(c) {
+  const x = Math.min(drag.start.x, drag.cur.x), y = Math.min(drag.start.y, drag.cur.y), w = Math.abs(drag.cur.x - drag.start.x), h = Math.abs(drag.cur.y - drag.start.y);
+  c.save(); c.fillStyle = 'rgba(76,141,255,0.08)'; c.strokeStyle = '#4c8dff'; c.lineWidth = 1; c.fillRect(x, y, w, h); c.strokeRect(x + 0.5, y + 0.5, w, h); c.restore();
 }
 
 // ---------- text editing ----------
@@ -275,7 +281,7 @@ function startEdit(t, before) {
   if (editing === t) return;
   if (editing) stopEdit();
   closePal();
-  editing = t; sel = t; lastJSON = before || JSON.stringify(objects); lastInputAt = 0;
+  editing = t; sels = [t]; lastJSON = before || JSON.stringify(objects); lastInputAt = 0;
   if (t.plain) docText = t;
   ed.value = t.text; ed.style.display = 'block'; placeEd(); render();
   ed.focus(); ed.setSelectionRange(ed.value.length, ed.value.length);
@@ -284,8 +290,8 @@ function stopEdit(keepEmpty) {
   if (!editing) return;
   const t = editing; editing = null; ed.style.display = 'none';
   t.text = ed.value.replace(/\s+$/, '');
-  if (!t.text.trim() && !keepEmpty) { const i = objects.indexOf(t); if (i >= 0) objects.splice(i, 1); if (sel === t) sel = null; }
-  if (sel === t && t.plain) sel = null;
+  if (!t.text.trim() && !keepEmpty) { const i = objects.indexOf(t); if (i >= 0) objects.splice(i, 1); sels = sels.filter(x => x !== t); }
+  if (t.plain) sels = sels.filter(x => x !== t);
   if (fresh && fresh.o === t) fresh = null;
   render();
 }
@@ -366,7 +372,7 @@ function addShape(cmd, p) {
   else if (cmd === 'triangle') o = { id: oid(), type: 'triangle', color, x: p.x - 60, y: p.y - 50, w: 120, h: 100 };
   else if (cmd === 'arrow') o = { id: oid(), type: 'arrow', color, x1: p.x - 75, y1: p.y, x2: p.x + 75, y2: p.y };
   else return;
-  snapshot(); objects.push(o); sel = o; render();
+  snapshot(); objects.push(o); sels = [o]; render();
 }
 
 // ---------- pointer ----------
@@ -378,35 +384,33 @@ cv.addEventListener('pointerdown', e => {
   if (editing) stopEdit(!!onHandle);
   closePal();
   try { cv.setPointerCapture(e.pointerId); } catch (_) {}
-  const h = hitHandle(sel, p.x, p.y);
-  if (h) { snapshot(); drag = { kind: 'resize', h: h.id, o: sel, start: p, orig: clone(sel), wasEmpty: sel.type === 'text' && !sel.text }; return; }
+  const single = one(), h = hitHandle(single, p.x, p.y);
+  if (h) { snapshot(); drag = { kind: 'resize', h: h.id, o: single, start: p, orig: clone(single), wasEmpty: single.type === 'text' && !single.text }; return; }
   const o = topHit(p.x, p.y);
   if (o) {
-    sel = o; snapshot();
-    const kids = o.type === 'text' ? [] : objects.filter(t => t.type === 'text' && inside(t.x + t.w / 2, t.y + t.h / 2, bbox(o)));
-    drag = { kind: 'move', o, start: p, orig: clone(o), kids, korig: kids.map(clone), moved: false }; render(); return;
+    if (e.shiftKey) { sels = sels.includes(o) ? sels.filter(x => x !== o) : [...sels, o]; render(); return; } // shift-click toggles
+    if (!sels.includes(o)) sels = [o];
+    const group = [...sels]; // the selection moves together, plus labels sitting inside moved shapes
+    for (const sh of sels) if (sh.type !== 'text') for (const t of objects) if (t.type === 'text' && !group.includes(t) && inside(t.x + t.w / 2, t.y + t.h / 2, bbox(sh))) group.push(t);
+    snapshot();
+    drag = { kind: 'move', o, start: p, group, orig: group.map(clone), moved: false }; render(); return;
   }
-  sel = null;
-  const s = { id: oid(), type: 'stroke', color, points: [p] };
-  snapshot(); objects.push(s); drag = { kind: 'draw', o: s }; render();
+  if (!e.shiftKey) sels = [];
+  drag = { kind: 'box', start: p, cur: p, moved: false, add: e.shiftKey }; render(); // rubber-band selection (or a click-to-type if it never moves)
 });
 addEventListener('pointermove', e => {
   const p = pt(e); mouse = p;
   if (!drag) {
     if (e.target !== cv) return;
-    const h = hitHandle(sel, p.x, p.y);
+    const h = hitHandle(one(), p.x, p.y);
     if (h) { cv.style.cursor = h.cur; return; }
-    const o = topHit(p.x, p.y); cv.style.cursor = o ? (o.type === 'text' ? 'text' : 'move') : 'crosshair'; return;
-  }
-  if (drag.kind === 'draw') {
-    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-    for (const ce of (evs.length ? evs : [e])) { const q = pt(ce), P = drag.o.points, last = P[P.length - 1]; if (Math.hypot(q.x - last.x, q.y - last.y) >= 1) P.push(q); }
-    render(); return;
+    const o = topHit(p.x, p.y); cv.style.cursor = o ? (o.type === 'text' ? 'text' : 'move') : 'text'; return;
   }
   const dx = p.x - drag.start.x, dy = p.y - drag.start.y;
+  if (drag.kind === 'box') { drag.cur = p; if (Math.hypot(dx, dy) > 3) drag.moved = true; render(); return; }
   if (drag.kind === 'move') {
     if (!drag.moved && Math.hypot(dx, dy) > 3) drag.moved = true;
-    if (drag.moved) { moveTo(drag.o, drag.orig, dx, dy); drag.kids.forEach((k, i) => moveTo(k, drag.korig[i], dx, dy)); render(); }
+    if (drag.moved) { drag.group.forEach((g, i) => moveTo(g, drag.orig[i], dx, dy)); render(); }
     return;
   }
   if (drag.kind === 'resize') { resizeTo(drag.o, drag.orig, drag.h, dx, dy); render(); }
@@ -414,12 +418,15 @@ addEventListener('pointermove', e => {
 addEventListener('pointerup', e => {
   if (!drag) return;
   const d = drag; drag = null;
-  if (d.kind === 'draw' && pathLen(d.o.points) < 3) { const i = objects.indexOf(d.o); if (i >= 0) objects.splice(i, 1); undoStack.pop(); }
-  else if (d.kind === 'move' && !d.moved) { undoStack.pop(); if (d.o.type === 'text') startEdit(d.o); }
-  else if (d.kind === 'move' && d.o.plain) sel = null;
+  if (d.kind === 'box') {
+    if (!d.moved) { render(); startPlain(pt(e)); return; } // a plain click: start typing there
+    const x1 = Math.min(d.start.x, d.cur.x), y1 = Math.min(d.start.y, d.cur.y), x2 = Math.max(d.start.x, d.cur.x), y2 = Math.max(d.start.y, d.cur.y);
+    const hit = objects.filter(o => { const b = bbox(o); return b.x >= x1 && b.y >= y1 && b.x + b.w <= x2 && b.y + b.h <= y2; }); // fully inside the box
+    sels = d.add ? [...new Set([...sels, ...hit])] : hit;
+  }
+  else if (d.kind === 'move' && !d.moved) { undoStack.pop(); sels = [d.o]; if (d.o.type === 'text') startEdit(d.o); }
   else if (d.kind === 'resize' && d.wasEmpty) startEdit(d.o);
   render();
-  if (d.kind === 'draw' && !objects.includes(d.o)) startPlain(pt(e));
 });
 addEventListener('pointercancel', () => { drag = null; render(); });
 cv.addEventListener('dblclick', e => {
@@ -442,14 +449,15 @@ addEventListener('keydown', e => {
   const meta = e.metaKey || e.ctrlKey;
   if (meta && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
   if (meta && e.key.toLowerCase() === 'k') { e.preventDefault(); if (editing) stopEdit(); askin.focus(); return; }
+  if (meta && e.key.toLowerCase() === 'a') { e.preventDefault(); sels = [...objects]; render(); return; }
   if (meta) return;
   if (e.key === '/') { e.preventDefault(); openPal(); return; }
-  if (e.key === 'Escape') { closePal(); sel = null; render(); return; }
-  if (!sel) { if (e.key.length === 1) { e.preventDefault(); typeInDoc(e.key); } return; }
-  if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); snapshot(); objects.splice(objects.indexOf(sel), 1); sel = null; render(); return; }
-  if (e.key === 'Enter' && sel.type === 'text') { e.preventDefault(); startEdit(sel); return; }
+  if (e.key === 'Escape') { closePal(); sels = []; render(); return; }
+  if (!sels.length) { if (e.key.length === 1) { e.preventDefault(); typeInDoc(e.key); } return; }
+  if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); snapshot(); objects = objects.filter(o => !sels.includes(o)); sels = []; render(); return; }
+  if (e.key === 'Enter' && sels.length === 1 && sels[0].type === 'text') { e.preventDefault(); startEdit(sels[0]); return; }
   const step = e.shiftKey ? 10 : 1, mv = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
-  if (mv) { e.preventDefault(); snapshot(); moveTo(sel, clone(sel), mv[0], mv[1]); render(); return; }
+  if (mv) { e.preventDefault(); snapshot(); sels.forEach(o => moveTo(o, clone(o), mv[0], mv[1])); render(); return; }
   if (e.key.length === 1) { e.preventDefault(); typeInDoc(e.key); }
 });
 
@@ -538,7 +546,7 @@ const view = o => { // what the model sees: everything, except stroke points are
 async function runCommand(text) {
   if (editing) stopEdit();
   closePal(); busy = true; askst.textContent = 'thinking…';
-  const body = { instruction: text, canvas: { w: innerWidth, h: innerHeight }, pen: color, selected: sel ? sel.id : null, mouse: { x: mouse.x, y: mouse.y }, nextId, objects: objects.map(view) };
+  const body = { instruction: text, canvas: { w: innerWidth, h: innerHeight }, pen: color, selected: sels.map(o => o.id), mouse: { x: mouse.x, y: mouse.y }, nextId, objects: objects.map(view) };
   try {
     const res = await fetch(API + '/api/command', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const data = await res.json().catch(() => ({}));
@@ -599,25 +607,24 @@ function applyOps(ops) { // one undo step for the whole command
   let snapped = false; const ensure = () => { if (!snapped) { snapshot(); snapped = true; } };
   for (const op of ops) {
     const kind = String(op.op || op.action || '').toLowerCase();
-    if (kind === 'add') { const o = makeObject(op.object || op); if (o) { ensure(); objects.push(o); sel = o; } }
+    if (kind === 'add') { const o = makeObject(op.object || op); if (o) { ensure(); objects.push(o); sels = [o]; } }
     else if (kind === 'update') { const o = byId(op.id); if (o) { ensure(); applySet(o, op.set || op.changes || op); } }
-    else if (kind === 'delete') { const ids = new Set((op.ids || [op.id]).map(Number)); ensure(); objects = objects.filter(o => !ids.has(o.id)); if (sel && ids.has(sel.id)) sel = null; }
-    else if (kind === 'clear') { ensure(); objects = []; sel = null; }
+    else if (kind === 'delete') { const ids = new Set((op.ids || [op.id]).map(Number)); ensure(); objects = objects.filter(o => !ids.has(o.id)); sels = sels.filter(o => !ids.has(o.id)); }
+    else if (kind === 'clear') { ensure(); objects = []; sels = []; }
     else if (kind === 'undo') { undo(); snapped = false; }
     else if (kind === 'redo') { redo(); snapped = false; }
-    else if (kind === 'select') { const o = byId(op.id); if (o) sel = o; }
+    else if (kind === 'select') { const list = (op.ids || [op.id]).map(byId).filter(Boolean); if (list.length) sels = list; }
     else if (kind === 'pen') setPen(String(op.color || '').toLowerCase());
     else if (kind === 'download') exportPNG();
     else if (kind === 'copy') copyDesc();
   }
-  if (sel && sel.plain) sel = null;
   render();
 }
 
 addEventListener('resize', fit);
 fit();
 startPlain(ORIGIN); // the page opens like a blank doc: caret at the top-left, just type
-window.__draw = { get objects() { return objects; }, describe, undo, applyOps, runCommand };
+window.__draw = { get objects() { return objects; }, get sels() { return sels; }, describe, undo, applyOps, runCommand };
 })();
 </script>
 </body>

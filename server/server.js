@@ -82,7 +82,7 @@ http.createServer(async (req, res) => {
     const maxId = objects.reduce((m, o) => Math.max(m, Number(o.id) || 0), 0);
     const nextId = Number(body.nextId) > maxId ? Number(body.nextId) : maxId + 1;
     const user = [
-      `Canvas: ${canvas.w || "?"}x${canvas.h || "?"} px. Pen color: ${body.pen || "black"}. Selected object id: ${body.selected ?? "none"}. Mouse at: (${Math.round(body.mouse?.x ?? 0)},${Math.round(body.mouse?.y ?? 0)}). Highest existing id: ${maxId}. New objects you add get ids ${nextId}, ${nextId + 1}, ... in the order you add them.`,
+      `Canvas: ${canvas.w || "?"}x${canvas.h || "?"} px. Pen color: ${body.pen || "black"}. Selected object ids: ${JSON.stringify(body.selected ?? [])}. Mouse at: (${Math.round(body.mouse?.x ?? 0)},${Math.round(body.mouse?.y ?? 0)}). Highest existing id: ${maxId}. New objects you add get ids ${nextId}, ${nextId + 1}, ... in the order you add them.`,
       `Current objects (JSON): ${JSON.stringify(objects)}`,
       `Instruction: ${instruction}`,
     ].join("\n\n");
